@@ -59,6 +59,16 @@ lemma vector.update_nth_comm {α : Type*} {len : ℕ} {v : vector α len}
     iterate {simp [*]},
   end
 
+@[simp]
+lemma vector.nth_of_append_fst {α : Type*} {l1 l2 : ℕ} (v1 : vector α l1) (v2 : vector α l2)
+    (i : fin (l1+l2)) {p : i.val < l1} : (v1.append v2).nth i = v1.nth ⟨i.val,p⟩
+  := begin
+    cases v1,
+    cases v2,
+    simp [fin.cast_add, fin.cast_le, fin.cast_lt, vector.append, vector.nth],
+    exact list.nth_le_append _ _,
+  end
+
 namespace regmachine
 
 /-  inc r l    ->  increment r and jump to l
@@ -71,11 +81,13 @@ inductive instr (rc ic : ℕ)
 
 namespace instr
 variables {rc ic : ℕ}
+  @[simp]
   def map_regs {rc' : ℕ} (f : fin rc → fin rc')
     : instr rc ic → instr rc' ic
     | (instr.inc r l)   := instr.inc (f r) l
     | (instr.dec r l k) := instr.dec (f r) l k
 
+  @[simp]
   def map_locs {ic' : ℕ} (f : option (fin ic) → option (fin ic'))
     : instr rc ic → instr rc ic'
     | (instr.inc r l)   := instr.inc r (f l)
@@ -145,8 +157,18 @@ namespace rm
 
   section variable (M : rm rc ic)
 
-  def extend {n : ℕ} : rm (rc+n) ic
-    := M.map (instr.map_regs (fin.cast_add n))
+  @[simp]
+  def map_locs {ic' : ℕ} (f : option (fin ic) → option (fin ic'))
+    : vector (instr rc ic') ic
+    := M.map (instr.map_locs f)
+
+  @[simp]
+  def join.ip_map_fst {ic' : ℕ} (l : fin ic) : fin (ic + ic')
+    := ⟨l.val, begin refine l.val.lt_add_right ic ic' _, exact l.property end⟩
+
+  @[simp]
+  def join.ip_map_snd {ic' : ℕ} (l : fin ic') : fin (ic + ic')
+    := ⟨ic + l.val, begin simpa using l.property end⟩
 
   /- joins M with M', one set of instructions
     after the other. allows the "rewiring"
@@ -156,20 +178,56 @@ namespace rm
           (M' : rm rc ic') (M'_halt_loc : option (fin (ic + ic')))
     : rm rc (ic + ic')
     := vector.append
-        (M.map (instr.map_locs (λ lopt, match lopt with
-          | some l := some (⟨l.val + ic', begin simpa using l.property end⟩)
-          | none := M_halt_loc
-          end)))
-        (M'.map (instr.map_locs (λ lopt, match lopt with
-          | some l := some (⟨ic + l.val, begin simpa using l.property end⟩)
-          | none := M'_halt_loc
-          end)))
+        (M.map_locs (λ ip, match ip with some l := some (join.ip_map_fst l)
+                                       | none := M_halt_loc end))
+        (M'.map_locs (λ ip, match ip with some l := some (join.ip_map_snd l)
+                                        | none := M'_halt_loc end))
 
-  theorem join_preserves_behavior_fst  {ic' : ℕ} (M_halt_loc  : option (fin (ic + ic')))
+  lemma join.preserves_step_fst {ic' : ℕ} (M_halt_loc  : option (fin (ic + ic')))
+          (M' : rm rc ic') (M'_halt_loc : option (fin (ic + ic')))
+    : ∀ {ip ip' : fin ic} {regs regs' : vector ℕ rc},
+        step M {ip := some ip, regs := regs} = {ip := some ip', regs := regs'}
+        → step (M.join M_halt_loc M' M'_halt_loc) {ip := some (join.ip_map_fst ip), regs := regs}
+            = {ip := some (join.ip_map_fst ip'), regs := regs'}
+    := begin
+      intros ip ip' regs regs' h,
+      cases h' : (M.nth ip),
+      case regmachine.instr.inc : r l {
+        simp [join, step],
+        rw vector.nth_of_append_fst _ _ _,
+        simp [join, step, h'] at h |-,
+        simp [join, h.left, h.right],
+        exact ip.property
+      },
+      case regmachine.instr.dec : r l k {
+        simp [join, step],
+        rw vector.nth_of_append_fst _ _ _,
+        cases h'' : regs.nth r,
+        simp [join, step, h', h''] at h |-,
+        simp [join, h.left, h.right],
+        simp [join, step, h', h''] at h |-,
+        simp [join, h.left, h.right],
+        iterate {exact ip.property},
+      }
+    end
+
+  theorem join.preserves_behavior_fst {ic' : ℕ} (M_halt_loc  : option (fin (ic + ic')))
           (M' : rm rc ic') (M'_halt_loc : option (fin (ic + ic')))
     : ∀ {c d : M.conf} (h : c ==> d),
         (M.join M_halt_loc M' M'_halt_loc).mk_conf c.s.new_ic ==> conf.mk d.s.new_ic
-    := begin sorry end
+    := begin
+      intros,
+      cases h,
+      induction h_w generalizing c,
+      use 0,
+      simp at h_h |-,
+      rw h_h,
+      simp [function.iterate_succ _ _] at h_h,
+      cases h : c.s.ip,
+      simp [step, h] at h_h,
+      exact h_w_ih h_h,
+      sorry
+    end
   
   end
 
