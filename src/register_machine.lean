@@ -1,5 +1,6 @@
 import data.vector
 import data.vector2
+import data.equiv.encodable.basic
 import data.fin
 import data.nat.pairing
 import data.nat.log
@@ -61,12 +62,22 @@ lemma vector.update_nth_comm {α : Type*} {len : ℕ} {v : vector α len}
 
 @[simp]
 lemma vector.nth_of_append_fst {α : Type*} {l1 l2 : ℕ} (v1 : vector α l1) (v2 : vector α l2)
-    (i : fin (l1+l2)) {p : i.val < l1} : (v1.append v2).nth i = v1.nth ⟨i.val,p⟩
+    (i : fin l1) : (v1.append v2).nth (fin.cast_add l2 i) = v1.nth i
   := begin
     cases v1,
     cases v2,
-    simp [fin.cast_add, fin.cast_le, fin.cast_lt, vector.append, vector.nth],
     exact list.nth_le_append _ _,
+  end
+
+@[simp]
+lemma vector.nth_of_append_snd {α : Type*} {l1 l2 : ℕ} (v1 : vector α l1) (v2 : vector α l2)
+    (i : fin l2) : (v1.append v2).nth (fin.nat_add l1 i) = v2.nth i
+  := begin
+    cases v1,
+    cases v2,
+    simp! [list.nth_le_drop],
+    congr,
+    simp [← v1_property],
   end
 
 namespace regmachine
@@ -92,248 +103,159 @@ variables {rc ic : ℕ}
     : instr rc ic → instr rc ic'
     | (instr.inc r l)   := instr.inc r (f l)
     | (instr.dec r l k) := instr.dec r (f l) (f k)
+
+  def eq {ic' : ℕ} (loc_eq : option (fin ic) → option (fin ic) → Prop)
+    : instr rc ic → instr rc ic → Prop
+    | (instr.inc r l) := λ i, match i with
+        instr.inc r' l' := r = r' ∧ loc_eq l l' | _ := ⊥ end 
+    | (instr.dec r l k) := λ i, match i with
+        instr.dec r' l' k' := r = r' ∧ loc_eq l l' ∧ loc_eq k k' | _ := ⊥ end
 end instr
 
 /- state consists of an instruction pointer and the registers.
    if ip is none then machine is halted. -/
 structure state (rc ic : ℕ) := (ip : option (fin ic)) (regs : vector ℕ rc)
 namespace state
-  def is_halted {rc ic : ℕ} (s : state rc ic) := s.ip = none
-  def new_ic {rc ic ic' : ℕ} (s : state rc ic) : state rc (ic+ic') :=
-    { ip := s.ip.map (λ l, fin.cast_add ic' l), regs := s.regs }
+  @[simp] def init {rc ic : ℕ} (input : ℕ) : state rc.succ ic.succ
+    := {ip := some 0, regs := input ::ᵥ vector.repeat 0 rc}
+  @[simp] def is_halted {rc ic : ℕ} (s : state rc ic) := s.ip = none
 end state
 
 /- register machine with rc registers and ic instructions -/
 def rm (rc ic : ℕ)
   := vector (instr rc ic) ic
 
-/- most important definition here! gives semantics to those incs and decs :) -/
-def step {rc ic : ℕ} (M : rm rc ic) (c : state rc ic) : state rc ic :=
-  match c.ip with
-  | none := c
-  | some ip :=
-    match M.nth ip with
-    | instr.inc r l := {ip := l, regs := c.regs.update_nth r (c.regs.nth r + 1)}
-    | instr.dec r l k :=
-        match c.regs.nth r with
-        | p + 1 := {ip := l, regs := c.regs.update_nth r p}
-        | 0 := {ip := k, regs := c.regs}
-        end
-    end
-  end
-
 namespace rm
-  variables {rc ic : ℕ}
+  variables {rc ic : ℕ} (M : rm rc ic)
 
-  /- a configuration for M is just a state.
-      used to store M at the type level. -/
-  structure conf (M : rm rc ic) := (s : state rc ic)
-
-  @[simp]
-  def mk_conf (M : rm rc ic) (s : state rc ic) : M.conf := {s := s}
-
-  namespace conf
-    variables {M : rm rc ic} (c : M.conf)
-
-    def steps_to (d : M.conf) :=
-      ∃ (t : ℕ), (step M)^[t] c.s = d.s
-
-    notation c `==>` d := c.steps_to d
-
-    lemma step_is_steps_to {c d : state rc ic}
-      (pf : step M c = d) : M.mk_conf c ==> conf.mk d
-      := begin use 1, simpa end
-
-    lemma steps_to_trans (c d e : M.conf)
-      (pf1 : c ==> d) (pf2 : d ==> e) : c ==> e
-      := begin
-        cases pf1,
-        cases pf2,
-        use pf2_w + pf1_w,
-        simpa [function.iterate_add, pf1_h]
+  /- most important definition here! gives semantics to those incs and decs :) -/
+  def step (c : state rc ic) : state rc ic :=
+    match c.ip with
+    | none := c
+    | some ip :=
+      match M.nth ip with
+      | instr.inc r l := {ip := l, regs := c.regs.update_nth r (c.regs.nth r + 1)}
+      | instr.dec r l k :=
+          match c.regs.nth r with
+          | p + 1 := {ip := l, regs := c.regs.update_nth r p}
+          | 0 := {ip := k, regs := c.regs}
+          end
       end
-
-  end conf
-
-  section variable (M : rm rc ic)
-
-  @[simp]
-  def map_locs {ic' : ℕ} (f : option (fin ic) → option (fin ic'))
-    : vector (instr rc ic') ic
-    := M.map (instr.map_locs f)
-
-  @[simp]
-  def join.ip_map_fst {ic' : ℕ} (l : fin ic) : fin (ic + ic')
-    := ⟨l.val, begin refine l.val.lt_add_right ic ic' _, exact l.property end⟩
-
-  @[simp]
-  def join.ip_map_snd {ic' : ℕ} (l : fin ic') : fin (ic + ic')
-    := ⟨ic + l.val, begin simpa using l.property end⟩
-
-  /- joins M with M', one set of instructions
-    after the other. allows the "rewiring"
-    of the halts in each machine to a new loc
-    in the new machine -/
-  def join {ic' : ℕ} (M_halt_loc : option (fin (ic + ic')))
-          (M' : rm rc ic') (M'_halt_loc : option (fin (ic + ic')))
-    : rm rc (ic + ic')
-    := vector.append
-        (M.map_locs (λ ip, match ip with some l := some (join.ip_map_fst l)
-                                       | none := M_halt_loc end))
-        (M'.map_locs (λ ip, match ip with some l := some (join.ip_map_snd l)
-                                        | none := M'_halt_loc end))
-
-  lemma join.preserves_step_fst {ic' : ℕ} (M_halt_loc  : option (fin (ic + ic')))
-          (M' : rm rc ic') (M'_halt_loc : option (fin (ic + ic')))
-    : ∀ {ip ip' : fin ic} {regs regs' : vector ℕ rc},
-        step M {ip := some ip, regs := regs} = {ip := some ip', regs := regs'}
-        → step (M.join M_halt_loc M' M'_halt_loc) {ip := some (join.ip_map_fst ip), regs := regs}
-            = {ip := some (join.ip_map_fst ip'), regs := regs'}
-    := begin
-      intros ip ip' regs regs' h,
-      cases h' : (M.nth ip),
-      case regmachine.instr.inc : r l {
-        simp [join, step],
-        rw vector.nth_of_append_fst _ _ _,
-        simp [join, step, h'] at h |-,
-        simp [join, h.left, h.right],
-        exact ip.property
-      },
-      case regmachine.instr.dec : r l k {
-        simp [join, step],
-        rw vector.nth_of_append_fst _ _ _,
-        cases h'' : regs.nth r,
-        simp [join, step, h', h''] at h |-,
-        simp [join, h.left, h.right],
-        simp [join, step, h', h''] at h |-,
-        simp [join, h.left, h.right],
-        iterate {exact ip.property},
-      }
     end
+  notation c `[` M `]==>` d := M.step c = d
 
-  theorem join.preserves_behavior_fst {ic' : ℕ} (M_halt_loc  : option (fin (ic + ic')))
-          (M' : rm rc ic') (M'_halt_loc : option (fin (ic + ic')))
-    : ∀ {c d : M.conf} (h : c ==> d),
-        (M.join M_halt_loc M' M'_halt_loc).mk_conf c.s.new_ic ==> conf.mk d.s.new_ic
-    := begin
-      intros,
-      cases h,
-      induction h_w generalizing c,
-      use 0,
-      simp at h_h |-,
-      rw h_h,
-      simp [function.iterate_succ _ _] at h_h,
-      cases h : c.s.ip,
-      simp [step, h] at h_h,
-      exact h_w_ih h_h,
-      sorry
-    end
+  @[simp]
+  def step_t (t : ℕ) := M.step^[t]
+  notation c `[` M `]==>^[` t `]` d := (M.step_t t) c = d
+
+  def steps_to (c d : state rc ic)
+    := ∃ (t : ℕ), c [M]==>^[t] d
+  notation c `[` M `]==>*` d := M.steps_to c d
+
+  @[simp]
+  lemma step_is_step_t_1 {c d : state rc ic}
+    : (c [M]==>^[1] d) ↔ (c [M]==> d)
+    := begin split, intro h, simpa using h,
+              intro h, simpa using h end
   
-  end
+  lemma steps_to_trans {c d e : state rc ic}
+    (h1 : c [M]==>* d) (h2 : d [M]==>* e)
+    : c [M]==>* e
+    := begin
+      cases h1, cases h2,
+      use h2_w + h1_w,
+      simp at h1_h h2_h,
+      simp [function.iterate_add, h1_h, h2_h]
+    end
 
-  open conf
+  lemma halt_is_fixpoint (regs : vector ℕ rc)
+    : {ip := none, regs := regs} [M]==> {ip := none, regs := regs}
+    := begin simp [step] end
 
-  /- generate an initial configuration with some input in the first
-    register and 0 elsewhere -/
-  def init (M : rm rc.succ ic.succ) (input : ℕ) : M.conf
-    := conf.mk {ip := some 0, regs := input ::ᵥ vector.repeat 0 rc}
-
-  def computes (M : rm rc.succ ic.succ) (f : ℕ → ℕ)
-    := ∀ (n : ℕ), ∃ (d : M.conf), (M.init n ==> d) ∧ (d.s.regs.nth 0 = f n)
+  def computes (M : rm rc.succ ic.succ) (f : ℕ → ℕ) := ∀ (n : ℕ), ∃ (regs : vector ℕ rc.succ),
+    ({ip := some 0, regs := vector.of_fn (λ i, fin.cases n (λ _, 0) i)}
+      [M]==>* {ip := none, regs := regs}) ∧ regs.nth 0 = f n
 
 end rm
 
-namespace macros
-variables {rc ic : ℕ}
+namespace subproc
+  variables {rc prelen sublen postlen : ℕ}
+            (halt_loc : option (fin (prelen + sublen + postlen)))
 
-  open instr
-  open rm
+  def embed_line (l : fin sublen)
+    : fin (prelen + sublen + postlen)
+    := fin.cast_add postlen (fin.nat_add prelen l)
 
-  -- sets register r back to 0
-  def rst (r : fin rc) : rm rc 1 := ⟨[
-    dec r (some 0) none
-  ], rfl⟩
+  def embed_loc (loc : option (fin sublen))
+    : option (fin (prelen + sublen + postlen))
+    := match loc with
+    | some l := some (embed_line l)
+    | none := halt_loc
+    end
+  
+  @[simp] def embed_state (s : state rc sublen)
+    : state rc (prelen + sublen + postlen)
+    := {ip := embed_loc halt_loc s.ip, regs := s.regs}
+
+  @[simp] def embed_rm (M : rm rc sublen)
+    : vector (instr rc (prelen + sublen + postlen)) sublen
+    := M.map (instr.map_locs (embed_loc halt_loc))
 
   section
-  variables {r : fin rc} {regs : vector ℕ rc}
+  variables 
+    (preM : vector (instr rc (prelen+sublen+postlen)) prelen)
+    (subM : rm rc sublen)
+    (postM : vector (instr rc (prelen+sublen+postlen)) postlen)
 
-  lemma rst_step_zero (h : regs.nth r = 0)
-    : (rst r).mk_conf {ip := some 0, regs := regs} ==>
-        conf.mk {ip := none, regs := regs}
-    := begin apply conf.step_is_steps_to, simp [step, vector.head, rst, h] end
-  
-  lemma rst_step_succ {n : ℕ} (h : regs.nth r = n.succ)
-    : (rst r).mk_conf {ip := some 0, regs := regs} ==>
-        conf.mk {ip := some 0, regs := regs.update_nth r n}
-    := begin apply conf.step_is_steps_to, simp [step, vector.head, rst, h] end
-  
-  theorem rst_effect {r : fin rc} {regs : vector ℕ rc}
-    : (rst r).mk_conf {ip := some 0, regs := regs} ==>
-      conf.mk {ip := none, regs := regs.update_nth r 0}
+  lemma preserves_step
+    : let M : rm rc (prelen+sublen+postlen)
+            := (preM.append (embed_rm halt_loc subM)).append postM in
+      ∀ {c : state rc sublen},
+        (embed_state halt_loc c [M]==>* embed_state halt_loc (subM.step c))
     := begin
-      induction h : (regs.nth r) generalizing regs,
-      simp [step, h],
-      exact rst_step_zero h,
-      refine rm.conf.steps_to_trans _
-        ((rst r).mk_conf {ip := some 0, regs := regs.update_nth r n})
-        _ _ _,
-      exact rst_step_succ h,
-      have : (regs.update_nth r n).nth r = n := vector.nth_update_nth_same _ _ _,
-      convert ih this using 3,
-      rw vector.update_nth_update_nth_same
+      intros,
+      cases h : c, rw h at *, clear h c,
+      cases ip,
+      have h := subM.halt_is_fixpoint regs,
+      use 0,
+      simp [h],
+      use 1,
+      rw [rm.step_t, nat.iterate, nat.iterate],
+      have : M.nth (embed_line ip) = instr.map_locs (embed_loc halt_loc) (subM.nth ip),
+        simp [embed_line, embed_loc],
+      simp [embed_loc, rm.step, this],
+      cases h : (subM.nth ip),
+      case regmachine.instr.inc : r l {
+        simp [rm.step, embed_loc],
+      },
+      case regmachine.instr.dec : r l k {
+        cases h' : regs.nth r,
+        simp [rm.step, embed_loc, h'],
+        simp [rm.step, embed_loc, h'],
+      }
     end
 
-  end
-
-  def mov (_from _to : fin rc) : rm rc 2 := ⟨[
-    dec _from (some 1) none,
-    inc _to (some 0)
-  ], rfl⟩
-  
-  section
-  variables {_from _to : fin rc} {regs : vector ℕ rc}
-
-  lemma mov_step_zero (h : regs.nth _from = 0)
-    : (mov _from _to).mk_conf {ip := some 0, regs := regs} ==>
-        conf.mk {ip := none, regs := regs}
-    := begin apply rm.conf.step_is_steps_to, simp [step, vector.head, mov, h] end
-  
-  lemma mov_step_succ {n_to n_from : ℕ} {nonequal : ¬ _from = _to} (h_from : regs.nth _from = n_from.succ) (h_to : regs.nth _to = n_to)
-    : (mov _from _to).mk_conf {ip := some 0, regs := regs} ==>
-        conf.mk {ip := some 0, regs := (regs.update_nth _from n_from).update_nth _to n_to.succ}
+  theorem preserves_behavior
+    : let M : rm rc (prelen+sublen+postlen)
+            := (preM.append (embed_rm halt_loc subM)).append postM in
+      ∀ {c d : state rc sublen}, (c [subM]==>* d)
+        → (embed_state halt_loc c [M]==>* embed_state halt_loc d)
     := begin
-        simp,
-        use 2,
-        simp [step, vector.head, vector.nth, mov, h_from, h_to, vector.nth_update_nth_of_ne nonequal]
-      end
-
-  theorem mov_effect {nonequal : ¬ _from = _to}
-    : (mov _from _to).mk_conf {ip := some 0, regs := regs} ==>
-      conf.mk {ip := none, regs := (regs.update_nth _from 0).update_nth _to (regs.nth _from + regs.nth _to)}
-    := begin
-      induction h : (regs.nth _from) generalizing regs,
-      simp [step, h],
-      exact mov_step_zero h,
-      refine rm.conf.steps_to_trans _
-        ((mov _from _to).mk_conf {ip := some 0, regs :=  (regs.update_nth _from n).update_nth _to (regs.nth _to).succ})
-        _ _ _,
-      refine mov_step_succ h rfl,
-      exact nonequal,
-      have : ((regs.update_nth _from n).update_nth _to (regs.nth _to).succ).nth _from = n,
-      rw vector.nth_update_nth_of_ne,
-      apply vector.nth_update_nth_same,
-      exact ne.symm nonequal,
-      convert ih this using 3,
-      simp [vector.nth_update_nth_of_ne],
-      rw vector.update_nth_comm (ne.symm nonequal),
-      simp [vector.update_nth_update_nth_same],
-      suffices : n.succ + regs.nth _to = n + (regs.nth _to).succ,
-        rw this,
-      exact nat.succ_add n (vector.nth regs _to)
+      intros M c d h,
+      cases h,
+      induction h_w generalizing c,
+      simp at h_h,
+      use 0,
+      simp [h_h],
+      simp at h_h,
+      have rest := h_w_ih h_h,
+      clear h_w_ih h_h,
+      have step : (embed_state halt_loc c [M]==>* embed_state halt_loc (subM.step c))
+                := preserves_step _ _ _ _,
+      exact M.steps_to_trans step rest,
     end
-
   end
 
-end macros
+end subproc
 
 end regmachine
