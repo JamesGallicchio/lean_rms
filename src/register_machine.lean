@@ -128,8 +128,9 @@ end prog
 structure config (rc ic : ℕ) := (ip : option (fin ic)) (regs : fin rc → ℕ)
 namespace config
   -- start at instruction 0 if it exists
-  @[simp] def init_ip (rc ic : ℕ) : option (fin ic)
-    := match ic with 0 := none | icp+1 := some 0 end
+  @[simp] def init_ip (rc : ℕ) : Π (ic : ℕ), option (fin ic)
+    | 0 := none
+    | (_+1) := some 0
 
   -- init register 0 with input, all others with 0
   @[simp] def init_regs (rcp ic : ℕ) (input : ℕ) : fin rcp.succ → ℕ
@@ -174,11 +175,7 @@ namespace prog
 
   notation c `[` P `]==>` d := step P c = d
 
-  @[simp]
-  def step_t (t : ℕ)
-    := (step P)^[t]
-
-  notation c `[` P `]==>^[` t `]` d := (step_t P t) c = d
+  notation c `[` P `]==>^[` t `]` d := P.step^[t] c = d
 
   def steps_to (c d : config rc ic)
     := ∃ (t : ℕ), c [P]==>^[t] d
@@ -207,7 +204,6 @@ namespace prog
     (h1 : c [P]==>^[t1] d) (h2 : d [P]==>^[t2] e)
     : c [P]==>^[t1+t2] e
     := begin
-      simp at h1 h2 |-,
       rw nat.add_comm t1 t2,
       rw function.iterate_add_apply (step P) t2 t1 c,
       rw [h1,h2],
@@ -219,13 +215,30 @@ namespace prog
     := begin
       cases h1, cases h2,
       use h2_w + h1_w,
-      simp at h1_h h2_h,
       simp [function.iterate_add, h1_h, h2_h]
     end
   
-  lemma halt_fix_step_t (regs : fin rc → ℕ) (t : ℕ)
-    : {ip := none, regs := regs} [P]==>^[t] {ip := none, regs := regs}
+  lemma halt_fix_step_t (t : ℕ) (regs : fin rc → ℕ)
+    : ⟨none,regs⟩ [P]==>^[t] ⟨none, regs⟩
     := begin induction t, simp, simpa, end
+
+  lemma some_step_to_some {t : ℕ} {regs regs' : fin rc → ℕ} {i i' : fin ic}
+    (h : ⟨some i, regs⟩ [P]==>^[t.succ] ⟨some i', regs'⟩)
+    : ∃ (next_i : fin ic), (P.step ⟨some i, regs⟩).ip = some next_i
+    := begin
+      cases h_c : (P.step ⟨some i, regs⟩),
+      cases h2 : ip,
+      case none {
+        by_contradiction, clear h,
+        rw function.iterate_succ_apply at h,
+        rw [h_c,h2] at h,
+        rw [P.halt_fix_step_t t regs_1] at h,
+        simpa using h,
+      },
+      case some {
+        use val,
+      }
+    end
 
   def run_from_state : config rc ic →. (fin rc → ℕ)
     := pfun.fix (λ c, roption.some (
@@ -401,7 +414,6 @@ namespace progs
         have emps := embed.preserves_steps P f finv h_finv w,
         have : (embed.config_map finv ∘ (P.step^[w])) ⟨ip,regs⟩ = ((embed P f).step^[w] ∘ embed.config_map finv) ⟨ip,regs⟩,
           rw emps, clear emps,
-        simp at h,
         simp [h, embed.config_map] at this,
         exact this.symm,
       end
@@ -415,62 +427,276 @@ namespace progs
       := (config.init_ip rc ic2).map (λ z,
           ⟨ic1 + z, begin exact nat.add_lt_add_left z.prop ic1, end⟩)
 
+    @[simp] def seq.loc_map_1 : option (fin ic1) → option (fin (ic1+ic2))
+    | (some i) := some ⟨i.val, i.val.lt_add_right ic1 ic2 i.prop⟩
+    | none := seq.midpoint_ic P1 P2
+
+    @[simp] def seq.loc_map_2 : option (fin ic2) → option (fin (ic1+ic2))
+    | (some i) := some ⟨ic1 + i,nat.add_lt_add_left i.prop ic1⟩
+    | none := none
+
     def seq : prog rc (ic1+ic2) :=
       fin.append rfl
-        (instr.map_locs (λ o, match o with
-                              | some i := some ⟨i.val, i.val.lt_add_right ic1 ic2 i.prop⟩
-                              | none := seq.midpoint_ic P1 P2
-                              end)
-            ∘ P1)
-        (instr.map_locs (option.map (λ i, ⟨ic1 + i,nat.add_lt_add_left i.prop ic1⟩))
-            ∘ P2)
+        (instr.map_locs (seq.loc_map_1 P1 P2) ∘ P1)
+        (instr.map_locs (seq.loc_map_2 P1 P2) ∘ P2)
 
     def seq' (P1 P2 : prog' rc) : prog' rc :=
       ⟨P1.fst+P2.fst, seq P1.snd P2.snd⟩
 
-    lemma seq.behavior
-      {r1 r2 r3 : fin rc → ℕ}
-      (h1 : ⟨config.init_ip rc ic1, r1⟩ [P1]==>* config.halted r2)
-      (h2 : ⟨config.init_ip rc ic2, r2⟩ [P2]==>* config.halted r3)
-      : ⟨config.init_ip rc (ic1+ic2), r1⟩ [seq P1 P2]==>* config.halted r3
+    variables {P1 P2}
+
+    lemma seq.preserves_step_1 {regs : fin rc → ℕ} {i : fin ic1} {c}
+      (h : ⟨some i, regs⟩ [P1]==> c)
+      : ⟨seq.loc_map_1 P1 P2 (some i), regs⟩ [seq P1 P2]==>
+          ⟨seq.loc_map_1 P1 P2 c.ip, c.regs⟩
       := begin
-        have phase1 : ⟨config.init_ip rc (ic1+ic2), r1⟩ [seq P1 P2]==>* ⟨seq.midpoint_ic P1 P2, r2⟩,
-          cases h1, use h1_w,
-          induction h1_w,
-            simp at h1_h |-, split, swap, exact h1_h.2,
+        have hic : (↑i < ic1 ↔ true),
+          split, intro, trivial,
+          intro, simpa using i.prop,
+        cases hi : P1 i,
+        case inc : r l {
+          simp [prog.step, hi] at h,
+          simp [prog.step, seq, ←h, hi, hic, fin.append],
+        },
+        case dec : r l k {
+          cases hr : regs r,
+          iterate {
+            simp [prog.step, hi, hr] at h,
+            simp [prog.step, seq, hi, hic, hr, ←h, fin.append],
+          },
+        },
+      end
+
+    lemma seq.preserves_step_2 {regs : fin rc → ℕ} {i : fin ic2} {c}
+      (h : ⟨some i, regs⟩ [P2]==> c)
+      : ⟨seq.loc_map_2 P1 P2 (some i), regs⟩ [seq P1 P2]==>
+          ⟨seq.loc_map_2 P1 P2 c.ip, c.regs⟩
+      := begin
+        cases hi : P2 i,
+        case inc : r l {
+          simp [prog.step, hi] at h,
+          simp [prog.step, seq, hi, ←h, fin.append],
+        },
+        case dec : r l k {
+          cases hr : regs r,
+          iterate {
+            simp [prog.step, hi] at h,
+            simp [prog.step, seq, hi, hr, ←h, fin.append],
+          }
+        },
+      end
+    
+    lemma seq.preserves_steps_1 {i : fin ic1} {regs regs' : fin rc → ℕ}
+      (h : ⟨some i, regs⟩ [P1]==>* config.halted regs')
+      : ⟨seq.loc_map_1 P1 P2 (some i), regs⟩ [seq P1 P2]==>* ⟨seq.midpoint_ic P1 P2,regs'⟩
+      := begin
+        cases ic1,
+        case zero {
+          exact fin.elim0 i,
+        },
+        simp,
+        cases h, induction h_w generalizing i regs,
+        case zero {
+          simpa using h_h,
+        },
+        case succ {
+          simp at h_h,
+          cases h_c : P1.step {ip := some i, regs := regs},
+          rw h_c at h_h,
+          cases ip,
+          case none {
+            rw prog.halt_fix_step_t at h_h,
+            simp at h_h,
+            use 1,
+            simp,
+            convert seq.preserves_step_1 h_c,
+            exact h_h.symm,
+          },
+          refine prog.steps_to_trans _ _ (h_w_ih h_h),
+          use 1, simp,
+          exact seq.preserves_step_1 h_c,
+        },
+      end
+
+    lemma seq.preserves_steps_2 {i : fin ic2} {regs regs' : fin rc → ℕ}
+      (h : ⟨some i, regs⟩ [P2]==>* config.halted regs')
+      : ⟨seq.loc_map_2 P1 P2 (some i), regs⟩ [seq P1 P2]==>* ⟨none,regs'⟩
+      := begin
+        cases ic2,
+        case zero {
+          exact fin.elim0 i,
+        },
+        simp,
+        cases h, induction h_w generalizing i regs,
+        case zero {
+          simpa using h_h,
+        },
+        case succ {
+          simp at h_h,
+          cases h_c : P2.step {ip := some i, regs := regs},
+          rw h_c at h_h,
+          cases ip,
+          case none {
+            rw prog.halt_fix_step_t at h_h,
+            simp at h_h,
+            use 1,
+            simp,
+            convert seq.preserves_step_2 h_c,
+            exact h_h.symm,
+          },
+          refine prog.steps_to_trans _ _ (h_w_ih h_h),
+          use 1, simp,
+          exact seq.preserves_step_2 h_c,
+        },
+      end
+
+theorem seq.behavior {r1 r2 r3 : fin rc → ℕ}
+  (h1 : ⟨config.init_ip rc ic1, r1⟩ [P1]==>* config.halted r2)
+  (h2 : ⟨config.init_ip rc ic2, r2⟩ [P2]==>* config.halted r3)
+  : ⟨config.init_ip rc (ic1+ic2), r1⟩ [seq P1 P2]==>* config.halted r3
+      := begin
+        have phase1 : ⟨config.init_ip rc (ic1+ic2), r1⟩ [seq P1 P2]==>* ⟨seq.midpoint_ic P1 P2, r2⟩
+          := begin
+          cases ic1,
+          case zero {
+            simp [config.init_ip] at h1 |-,
+            cases h1,
+            simp [prog.halt_fix_step_t] at h1_h,
+            rw h1_h,
+            use 0,
             simp [seq.midpoint_ic],
-            rw (sorry : ic1 = 0),
-            simp [nat.zero_add, fin.zero_add],
-            exact sorry,
-          exact sorry,
-        have phase2 : ⟨seq.midpoint_ic P1 P2, r2⟩ [seq P1 P2]==>* config.halted r3,
-          exact sorry,
+            cases ic2, simp, simp, congr,
+          },
+          simp at h1,
+          convert seq.preserves_steps_1 h1,
+          induction ic2,
+          refl, refl,
+        end,
+        have phase2 : ⟨seq.midpoint_ic P1 P2, r2⟩ [seq P1 P2]==>* config.halted r3
+          := begin
+          cases ic2,
+          case zero {
+            simp [config.init_ip] at h2 |-,
+            cases h2,
+            simp [prog.halt_fix_step_t] at h2_h,
+            rw h2_h,
+            use 0,
+            simp [seq.midpoint_ic],
+          },
+          simp at h2,
+          exact seq.preserves_steps_2 h2,
+          end,
         exact prog.steps_to_trans (seq P1 P2) phase1 phase2,
       end
 
   end
 
-  def loop {rc ic : ℕ} (P : prog rc ic)
-    : prog rc.succ ic.succ
+  def loop {rc icp : ℕ} (P : prog rc icp.succ) : prog rc.succ icp.succ.succ
     := fin.cons (instr.dec 0 (some 1) none)
         (instr.map_locs (λ l, match l with some x := some x.succ | none := some 0 end)
           ∘ instr.map_regs (λ r, r.succ)
           ∘ P)
 
-  theorem loop.behavior {rc ic : ℕ} (P : prog rc ic)
+  namespace loop
+    variables {rc icp : ℕ} (P : prog rc icp.succ)
         (f_P : (fin rc → ℕ) → (fin rc → ℕ))
-        (hf : ∀ regs, ⟨config.init_ip rc ic,regs⟩ [P]==>* {ip := none, regs := f_P regs})
-    : ∀ n regs, {ip := some 0, regs := fin.cons n regs}
-        [loop P]==>* {ip := none, regs := fin.cons 0 (f_P^[n] regs)}
-    := sorry
+        (hf : ∀ regs, ⟨config.init_ip rc icp.succ,regs⟩ [P]==>* {ip := none, regs := f_P regs})
 
-  def reset : prog 1 1 := loop ![]
+    lemma preserves_step (x : ℕ) (i : fin icp.succ) (ip' : option (fin icp.succ))
+      (regs regs' : fin rc → ℕ)
+      (h : ⟨some i, regs⟩ [P]==> ⟨ip', regs'⟩)
+      : ⟨some i.succ, fin.cons x regs⟩ [loop P]==>
+          ⟨match ip' with none := some 0 | some x := x.succ end, fin.cons x regs'⟩
+      := begin
+        simp [loop, prog.step] at h |-,
+        cases h_i : P i,
+        case inc : r l {
+          simp [prog.step, h_i] at h |-,
+          rw [h.1, ←fin.cons_update, h.2], simp,
+          cases ip',
+          simp [_match_1],
+          simp [_match_1],
+          congr,
+        },
+        case dec : r l k {
+          simp [prog.step, h_i] at h |-,
+          cases h_r : regs r,
+          simp [prog.step, _match_1, h_r] at h |-,
+          rw [h.1, h.2], simp [_match_1],
+          cases ip',
+          simp [_match_1],
+          simp [_match_1],
+          congr,
+          simp [prog.step, _match_1, h_r] at h |-,
+          rw [h.1, ←fin.cons_update, h.2], simp [_match_1],
+          cases ip',
+          simp [_match_1],
+          simp [_match_1],
+          congr,
+        },
+      end
+
+    lemma preserves_steps (x : ℕ) (i : fin icp.succ)
+      (regs regs' : fin rc → ℕ)
+      (h : ⟨some i, regs⟩ [P]==>* ⟨none, regs'⟩)
+      : ⟨some i.succ, fin.cons x regs⟩ [loop P]==>*
+          ⟨some 0, fin.cons x regs'⟩
+      := begin
+        cases h, induction h_w generalizing i regs,
+        case zero {
+          simp at h_h, contradiction,
+        },
+        rw function.iterate_succ_apply at h_h,
+        cases h_step : P.step ⟨some i, regs⟩,
+        rw h_step at h_h,
+        cases ip,
+        case none {
+          simp [prog.halt_fix_step_t] at h_h,
+          rw h_h at h_step,
+          use 1, simp,
+          exact preserves_step P x i none regs regs' h_step,
+        },
+        have : ⟨some i.succ, fin.cons x regs⟩ [loop P]==>* ⟨some ip.succ, fin.cons x regs_1⟩,
+          use 1, exact preserves_step P x i (some ip) regs regs_1 h_step,
+        refine prog.steps_to_trans (loop P) this _, clear this,
+        exact h_w_ih ip regs_1 h_h,
+      end
+    
+    include hf
+
+    theorem behavior
+      : ∀ n regs, {ip := some 0, regs := fin.cons n regs}
+          [loop P]==>* {ip := none, regs := fin.cons 0 (f_P^[n] regs)}
+      := begin
+        intros,
+        induction n generalizing regs,
+        case zero {
+          use 1, simp [loop, prog.step],
+        },
+        have step_1 : ⟨some 0, fin.cons n_n.succ regs⟩ [loop P]==>* ⟨some 1, fin.cons n_n regs⟩,
+          use 1, simp [loop, prog.step, fin.update_cons_zero],
+        have step_2 : ⟨some 1, fin.cons n_n regs⟩ [loop P]==>* ⟨some 0, fin.cons n_n (f_P regs)⟩,
+          refine preserves_steps P n_n 0 regs (f_P regs) _,
+          exact hf regs,
+        have step_12 := prog.steps_to_trans _ step_1 step_2,
+        exact prog.steps_to_trans _ step_12 (n_ih (f_P regs)),
+      end
+  end loop
+
+  def reset : prog 1 1 := ![instr.dec 0 (some 0) none]
 
   lemma reset.behavior (n : ℕ)
     : (config.init n) [reset]==>* (config.halted (![0]))
     := begin
-      convert loop.behavior ![] (λ x,x) (begin intro, use 0, simp, end) n ![],
-      simp,
+      use n.succ,
+      induction n, simpa [reset, prog.step],
+      rw function.iterate_succ_apply,
+      conv {
+        to_lhs,
+        congr, skip, skip,
+        simp [reset, prog.step, fin.update_cons_zero],
+      },
+      simpa using n_ih,
     end
 
   @[simp] def mov.loop_prog : prog 1 1 := ![instr.inc 0 none]
@@ -547,8 +773,8 @@ namespace progs
                   ![2*n, 0, 0]
           := begin ext, fin_cases x, iterate {simp, abel,}, end,
       rw h_c3 at em2,
-      have s1 := seq.behavior _ _ em1 em2,
-      have s2 := seq.behavior _ _ db s1,
+      have s1 := seq.behavior em1 em2,
+      have s2 := seq.behavior db s1,
       convert s2,
       simp, ext, fin_cases x, iterate { simp, simpa, },
     end
