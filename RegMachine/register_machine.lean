@@ -779,7 +779,37 @@ theorem seq.behavior {r1 r2 r3 : fin rc → ℕ}
       simp, ext, fin_cases x, iterate { simp, simpa, },
     end
   end
-  
+
+  def pair : prog 4 8 := loop double
+
+  def pair.behavior (n m : ℕ)
+    : ⟨some 0, ![n, m, 0, 0]⟩ [pair]==>* ⟨none, ![0, 2^n * m, 0, 0]⟩
+    := begin
+      refine loop.behavior double (λ r, ![2 * r 1, r 2, r 3]) _,
+    end
+
+  def div2 : prog 3 4 :=
+    ![
+      instr.dec 0 (some 1) none,
+      instr.dec 0 (some 2) (some 3),
+      instr.inc 1 (some 0),
+      instr.inc 2 none
+    ]
+
+  def div2.behavior (n a b : ℕ)
+    : ⟨some 0, ![n,a,b]⟩ [div2]==>* ⟨none, ![0,a + (n / 2),b + (n % 2)]⟩
+    := begin
+      induction h : (n/2) generalizing a,
+      case zero {
+        cases n,
+        use 1, simp [div2, prog.step],
+        cases n,
+        use 3, simp [div2, prog.step],
+        ext, fin_cases x, iterate {simpa},
+      },
+      refine prog.steps_to_trans _ _ (n_ih a.succ),
+    end
+
 end progs
 
 /- encodable type where an RM can recognize
